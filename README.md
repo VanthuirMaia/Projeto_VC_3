@@ -31,6 +31,8 @@ Projeto3/
 
 ## Instalação
 
+### 1. Instalar Python e dependências
+
 ```bash
 # Criar ambiente virtual
 python -m venv venv
@@ -41,9 +43,61 @@ venv\Scripts\activate
 # Ativar ambiente (Linux/Mac)
 source venv/bin/activate
 
-# Instalar dependências
+# Instalar dependências Python
 pip install -r requirements.txt
 ```
+
+### 2. Instalar Tesseract OCR
+
+O projeto requer o Tesseract OCR instalado no sistema operacional.
+
+#### Windows:
+1. Baixe o instalador do Tesseract:
+   - https://github.com/UB-Mannheim/tesseract/wiki
+   - Recomendado: `tesseract-ocr-w64-setup-5.x.x.exe`
+2. Execute o instalador e instale no caminho padrão: `C:\Program Files\Tesseract-OCR`
+3. (Opcional) Adicione ao PATH do sistema, ou configure manualmente em `src/config.py`:
+   ```python
+   "tesseract": {
+       "tesseract_cmd": r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+       ...
+   }
+   ```
+4. Baixe o pacote de idioma português durante a instalação, ou baixe separadamente:
+   - https://github.com/tesseract-ocr/tessdata
+
+#### Linux (Ubuntu/Debian):
+```bash
+sudo apt-get update
+sudo apt-get install tesseract-ocr
+sudo apt-get install tesseract-ocr-por  # Português
+```
+
+#### Linux (Fedora/RHEL):
+```bash
+sudo dnf install tesseract
+sudo dnf install tesseract-langpack-por  # Português
+```
+
+#### macOS:
+```bash
+brew install tesseract
+brew install tesseract-lang  # Inclui português
+```
+
+### 3. Verificar Instalação
+
+Após instalar, teste o Tesseract:
+
+```bash
+# Verificar versão
+tesseract --version
+
+# Testar OCR
+python -c "import pytesseract; print(pytesseract.get_tesseract_version())"
+```
+
+**Nota:** O código detecta automaticamente o Tesseract no Windows. Se não encontrar, configure manualmente em `src/config.py`.
 
 ## Uso
 
@@ -155,7 +209,7 @@ print(nf_data.to_dict())
 
 **Alternativas implementadas:**
 - **PaddleOCR:** Estado da arte, rápido, bom para tabelas
-- **Tesseract:** Fallback confiável, mantido pelo Google
+- **Tesseract:** Fallback confiável, mantido pelo Google, requer instalação separada
 
 ### 4. Extração de Campos
 

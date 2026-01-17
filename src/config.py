@@ -199,6 +199,10 @@ OCR_CONFIG = {
     "tesseract": {
         "lang": "por",  # Português
         "config": "--oem 3 --psm 6",  # LSTM OCR, assume bloco de texto
+        # Caminho do executável Tesseract (None = detecção automática)
+        # Windows exemplo: r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        # Linux/Mac: geralmente em PATH, mas pode ser "/usr/bin/tesseract"
+        "tesseract_cmd": None,  # None = tentar detecção automática
     },
 
     # Limiares de confiança

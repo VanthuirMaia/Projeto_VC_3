@@ -132,14 +132,60 @@ class OCREngine:
         """Inicializa Tesseract."""
         try:
             import pytesseract
-            # Testa se Tesseract está instalado
-            pytesseract.get_tesseract_version()
+            import platform
+            import os
+            
+            # Obtém configuração do Tesseract
+            cfg = self.config.get("tesseract", {})
+            tesseract_cmd = cfg.get("tesseract_cmd")
+            
+            # Se caminho especificado, configura
+            if tesseract_cmd:
+                pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+                logger.info(f"Tesseract configurado manualmente: {tesseract_cmd}")
+            else:
+                # Tenta detecção automática (especialmente no Windows)
+                if platform.system() == "Windows":
+                    # Caminhos comuns no Windows
+                    common_paths = [
+                        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                        r"C:\Users\{}\AppData\Local\Tesseract-OCR\tesseract.exe".format(os.getenv('USERNAME', '')),
+                        r"C:\tesseract\tesseract.exe",
+                    ]
+                    
+                    # Verifica se algum caminho existe
+                    for path in common_paths:
+                        if os.path.exists(path):
+                            pytesseract.pytesseract.tesseract_cmd = path
+                            logger.info(f"Tesseract detectado automaticamente: {path}")
+                            break
+                    else:
+                        # Tenta encontrar no PATH
+                        try:
+                            pytesseract.get_tesseract_version()
+                            logger.info("Tesseract encontrado no PATH")
+                        except:
+                            logger.warning(
+                                "Tesseract não encontrado automaticamente no Windows. "
+                                "Configure manualmente em config.py: tesseract_cmd = r'C:\\...\\tesseract.exe'"
+                            )
+            
+            # Testa se Tesseract está funcionando
+            version = pytesseract.get_tesseract_version()
             self._engines["tesseract"] = pytesseract
-            logger.info("Tesseract inicializado com sucesso")
+            logger.info(f"Tesseract inicializado com sucesso (versão: {version})")
+            
         except ImportError:
             logger.warning("pytesseract não instalado. Use: pip install pytesseract")
         except Exception as e:
             logger.warning(f"Tesseract não encontrado no sistema: {e}")
+            logger.warning(
+                "Para instalar o Tesseract:\n"
+                "  Windows: https://github.com/UB-Mannheim/tesseract/wiki\n"
+                "  Linux: sudo apt-get install tesseract-ocr tesseract-ocr-por\n"
+                "  Mac: brew install tesseract tesseract-lang"
+            )
 
     def get_available_engines(self) -> List[str]:
         """Retorna lista de engines disponíveis."""
