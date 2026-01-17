@@ -279,8 +279,23 @@ print(nf_data.to_dict())
 - **OpenCV** - Processamento de imagens
 - **EasyOCR** - OCR principal
 - **PaddleOCR** - OCR alternativo
+- **Tesseract OCR** - OCR adicional
 - **FastAPI** - API REST
 - **Pydantic** - Validação de dados
+- **PyTorch** - Framework de deep learning
+
+## 👥 Desenvolvedores
+
+Este projeto foi desenvolvido por:
+
+- **Karim Gomes**  
+  [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=flat&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/karim-gomes-253023154/)
+
+- **Rodrigo Santana**  
+  [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=flat&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/rodrigosantana94/)
+
+- **Vanthuir Maia**  
+  [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=flat&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/vanthuir-maia-47767810b/)
 
 ## Licença
 
