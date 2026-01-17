@@ -54,6 +54,7 @@ class OCRResponse(BaseModel):
     text: str
     detections: List[OCRResultModel] = []
     engine_used: str
+    engines_results: dict = {}  # Resultados por engine quando usa ensemble
 
 
 class NFItemModel(BaseModel):
@@ -160,24 +161,25 @@ def get_nf_extractor() -> NFExtractor:
 # FUNÇÕES AUXILIARES
 # =============================================================================
 
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".gif"}
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".gif", ".pdf"}
 MAX_FILE_SIZE = API_CONFIG.get("max_upload_size_mb", 10) * 1024 * 1024
 
 
-async def validate_and_load_image(file: UploadFile) -> np.ndarray:
+async def validate_and_load_file(file: UploadFile) -> tuple[List[np.ndarray], bool]:
     """
-    Valida e carrega imagem do upload.
+    Valida e carrega imagem ou PDF do upload.
 
     Args:
         file: Arquivo enviado
 
     Returns:
-        Imagem como array numpy
+        Tupla (lista de imagens, is_pdf)
 
     Raises:
         HTTPException: Se arquivo inválido
     """
     # Verifica extensão
+    ext = ""
     if file.filename:
         ext = Path(file.filename).suffix.lower()
         if ext not in ALLOWED_EXTENSIONS:
@@ -196,17 +198,27 @@ async def validate_and_load_image(file: UploadFile) -> np.ndarray:
             detail=f"Arquivo muito grande. Máximo: {MAX_FILE_SIZE // (1024*1024)}MB"
         )
 
-    # Carrega imagem
+    is_pdf = ext == ".pdf" or contents[:4] == b'%PDF'
+
+    # Carrega arquivo
     try:
-        image = Image.open(io.BytesIO(contents))
-        # Converte para RGB se necessário
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        return np.array(image)
+        if is_pdf:
+            processor = get_image_processor()
+            images = processor.load_pdf_from_bytes(contents)
+            if not images:
+                raise HTTPException(status_code=400, detail="PDF vazio ou inválido")
+            return images, True  # Retorna todas as páginas
+        else:
+            image = Image.open(io.BytesIO(contents))
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            return [np.array(image)], False  # Retorna como lista
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Erro ao carregar imagem: {str(e)}"
+            detail=f"Erro ao carregar arquivo: {str(e)}"
         )
 
 
@@ -232,32 +244,62 @@ async def health_check():
 
 @app.post("/ocr", response_model=OCRResponse)
 async def perform_ocr(
-    file: UploadFile = File(..., description="Imagem da Nota Fiscal"),
-    engine: Optional[str] = Query(None, description="Engine OCR a usar"),
+    file: UploadFile = File(..., description="Imagem ou PDF da Nota Fiscal"),
+    engine: Optional[str] = Query(None, description="Engine OCR (easyocr, paddleocr, tesseract) ou 'ensemble' para usar todos"),
     preprocess: bool = Query(True, description="Aplicar pré-processamento"),
 ):
     """
-    Realiza OCR na imagem e retorna texto bruto.
+    Realiza OCR na imagem/PDF e retorna texto bruto.
 
-    - **file**: Imagem para processar (JPG, PNG, etc.)
-    - **engine**: Engine OCR (easyocr, paddleocr, tesseract). Padrão: primário configurado
+    Para PDFs, processa todas as páginas e concatena o texto.
+
+    - **file**: Arquivo para processar (JPG, PNG, PDF, etc.)
+    - **engine**: Engine OCR ou 'ensemble' para combinar múltiplos engines
     - **preprocess**: Se deve aplicar pré-processamento
     """
     try:
-        # Carrega imagem
-        image = await validate_and_load_image(file)
+        # Carrega imagens (pode ser múltiplas páginas de PDF)
+        images, is_pdf = await validate_and_load_file(file)
 
-        # Pré-processamento
         processor = get_image_processor()
-        if preprocess:
-            image = processor.process_for_ocr(image, binarize=False)
-
-        # OCR
         ocr = get_ocr_engine()
-        results = ocr.extract_text(image, engine=engine, detail=True)
 
-        # Filtra por confiança
-        results = ocr.filter_by_confidence(results)
+        use_ensemble = engine == "ensemble"
+        all_results = []
+        all_texts = []
+        engines_summary = {}
+
+        # Processa cada página/imagem
+        for page_num, image in enumerate(images):
+            # Pré-processamento
+            if preprocess:
+                image = processor.process_for_ocr(image, binarize=False)
+
+            if use_ensemble:
+                # Usa múltiplos engines
+                combined, results_by_engine = ocr.extract_with_ensemble(image)
+                filtered = ocr.filter_by_confidence(combined)
+                all_results.extend(filtered)
+
+                # Combina texto de todos os engines
+                page_text = ocr.get_combined_text(results_by_engine)
+                all_texts.append(page_text)
+
+                # Sumariza resultados por engine
+                for eng, res in results_by_engine.items():
+                    if eng not in engines_summary:
+                        engines_summary[eng] = {"detections": 0, "sample_texts": []}
+                    engines_summary[eng]["detections"] += len(res)
+                    # Adiciona alguns textos de exemplo
+                    for r in res[:3]:
+                        if r.text not in engines_summary[eng]["sample_texts"]:
+                            engines_summary[eng]["sample_texts"].append(r.text)
+            else:
+                # Usa engine único
+                results = ocr.extract_text(image, engine=engine, detail=True)
+                filtered = ocr.filter_by_confidence(results)
+                all_results.extend(filtered)
+                all_texts.append(ocr.get_full_text(filtered))
 
         # Monta resposta
         detections = [
@@ -266,14 +308,18 @@ async def perform_ocr(
                 confidence=r.confidence,
                 bbox=r.bbox
             )
-            for r in results
+            for r in all_results
         ]
+
+        # Junta texto de todas as páginas
+        full_text = "\n\n".join(all_texts)
 
         return OCRResponse(
             success=True,
-            text=ocr.get_full_text(results),
+            text=full_text,
             detections=detections,
-            engine_used=engine or OCR_CONFIG.get("primary_engine", "easyocr")
+            engine_used="ensemble" if use_ensemble else (engine or OCR_CONFIG.get("primary_engine", "easyocr")),
+            engines_results=engines_summary if use_ensemble else {}
         )
 
     except HTTPException:
@@ -285,38 +331,71 @@ async def perform_ocr(
 
 @app.post("/extract", response_model=ExtractResponse)
 async def extract_nf_data(
-    file: UploadFile = File(..., description="Imagem da Nota Fiscal"),
-    engine: Optional[str] = Query(None, description="Engine OCR a usar"),
+    file: UploadFile = File(..., description="Imagem ou PDF da Nota Fiscal"),
+    engine: Optional[str] = Query("ensemble", description="Engine OCR ('easyocr', 'paddleocr', 'tesseract') ou 'ensemble' para usar todos (recomendado)"),
     include_raw_text: bool = Query(False, description="Incluir texto OCR bruto na resposta"),
 ):
     """
     Extrai dados estruturados da Nota Fiscal.
 
+    Para PDFs, processa todas as páginas e extrai dados do texto combinado.
+
+    **Recomendado:** Use engine='ensemble' para combinar múltiplos OCRs e melhorar precisão.
+
     Pipeline completo:
-    1. Pré-processamento da imagem
-    2. OCR para extração de texto
+    1. Pré-processamento da imagem/PDF (todas as páginas)
+    2. OCR para extração de texto (ensemble combina EasyOCR + PaddleOCR + Tesseract)
     3. Extração de campos (CNPJ, valores, etc.)
     4. Validação e formatação
 
-    - **file**: Imagem da NF (JPG, PNG, etc.)
-    - **engine**: Engine OCR a usar
+    - **file**: Arquivo da NF (JPG, PNG, PDF, etc.)
+    - **engine**: 'ensemble' (recomendado) ou engine específico
     - **include_raw_text**: Se deve incluir texto bruto na resposta
     """
     try:
-        # 1. Carrega imagem
-        image = await validate_and_load_image(file)
-        original_shape = image.shape
+        # 1. Carrega imagens (pode ser múltiplas páginas de PDF)
+        images, is_pdf = await validate_and_load_file(file)
 
-        # 2. Pré-processamento
         processor = get_image_processor()
-        processed_image = processor.process_for_ocr(image, binarize=False)
-        processed_shape = processed_image.shape
-
-        # 3. OCR
         ocr = get_ocr_engine()
-        ocr_results = ocr.extract_text(processed_image, engine=engine, detail=True)
-        filtered_results = ocr.filter_by_confidence(ocr_results)
-        full_text = ocr.get_full_text(filtered_results)
+
+        use_ensemble = engine == "ensemble"
+        all_texts = []
+        total_detections = 0
+        filtered_detections = 0
+        engines_used = []
+
+        # 2. Processa cada página
+        for page_num, image in enumerate(images):
+            # Pré-processamento
+            processed_image = processor.process_for_ocr(image, binarize=False)
+
+            if use_ensemble:
+                # Usa múltiplos engines combinados
+                combined, results_by_engine = ocr.extract_with_ensemble(processed_image)
+                filtered_results = ocr.filter_by_confidence(combined)
+
+                total_detections += len(combined)
+                filtered_detections += len(filtered_results)
+
+                # Combina texto de todos os engines
+                page_text = ocr.get_combined_text(results_by_engine)
+                all_texts.append(page_text)
+
+                engines_used = list(results_by_engine.keys())
+            else:
+                # Usa engine único
+                ocr_results = ocr.extract_text(processed_image, engine=engine, detail=True)
+                filtered_results = ocr.filter_by_confidence(ocr_results)
+
+                total_detections += len(ocr_results)
+                filtered_detections += len(filtered_results)
+
+                page_text = ocr.get_full_text(filtered_results)
+                all_texts.append(page_text)
+
+        # 3. Combina texto de todas as páginas
+        full_text = "\n\n".join(all_texts)
 
         # 4. Extração de campos
         extractor = get_nf_extractor()
@@ -343,11 +422,12 @@ async def extract_nf_data(
         )
 
         processing_info = {
-            "original_size": list(original_shape[:2]),
-            "processed_size": list(processed_shape[:2]) if len(processed_shape) >= 2 else list(processed_shape),
-            "ocr_engine": engine or OCR_CONFIG.get("primary_engine", "easyocr"),
-            "total_detections": len(ocr_results),
-            "filtered_detections": len(filtered_results),
+            "pages_processed": len(images),
+            "is_pdf": is_pdf,
+            "ocr_engine": "ensemble" if use_ensemble else (engine or OCR_CONFIG.get("primary_engine", "easyocr")),
+            "engines_used": engines_used if use_ensemble else [engine or OCR_CONFIG.get("primary_engine", "easyocr")],
+            "total_detections": total_detections,
+            "filtered_detections": filtered_detections,
         }
 
         return ExtractResponse(

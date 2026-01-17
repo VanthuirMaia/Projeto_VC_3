@@ -9,9 +9,15 @@ otimizadas para melhorar a precisão do OCR em documentos.
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Tuple, Optional, Union
+from typing import Tuple, Optional, Union, List
 from PIL import Image
 import io
+
+try:
+    import fitz  # PyMuPDF
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
 
 
 class ImageProcessor:
@@ -56,7 +62,7 @@ class ImageProcessor:
 
     def load_image(self, source: Union[str, Path, bytes, np.ndarray]) -> np.ndarray:
         """
-        Carrega imagem de diferentes fontes.
+        Carrega imagem de diferentes fontes (incluindo PDF).
 
         Args:
             source: Caminho do arquivo, bytes ou array numpy
@@ -68,6 +74,10 @@ class ImageProcessor:
             return source
 
         if isinstance(source, bytes):
+            # Verifica se é PDF pelos magic bytes
+            if source[:4] == b'%PDF':
+                images = self.load_pdf_from_bytes(source)
+                return images[0] if images else None
             nparr = np.frombuffer(source, np.uint8)
             return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -75,9 +85,131 @@ class ImageProcessor:
             path = Path(source)
             if not path.exists():
                 raise FileNotFoundError(f"Arquivo não encontrado: {path}")
+
+            # Verifica se é PDF
+            if path.suffix.lower() == '.pdf':
+                images = self.load_pdf(path)
+                return images[0] if images else None
+
             return cv2.imread(str(path))
 
         raise ValueError(f"Tipo de fonte não suportado: {type(source)}")
+
+    def load_pdf(self, pdf_path: Union[str, Path], dpi: int = 300) -> List[np.ndarray]:
+        """
+        Carrega PDF e converte cada página em imagem.
+
+        Args:
+            pdf_path: Caminho do arquivo PDF
+            dpi: Resolução de renderização (padrão 300 DPI)
+
+        Returns:
+            Lista de imagens (uma por página)
+        """
+        if not HAS_PYMUPDF:
+            raise ImportError("PyMuPDF não instalado. Use: pip install PyMuPDF")
+
+        pdf_path = Path(pdf_path)
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF não encontrado: {pdf_path}")
+
+        images = []
+        doc = fitz.open(str(pdf_path))
+
+        try:
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                # Matriz de zoom para alcançar DPI desejado (72 é o DPI padrão do PDF)
+                zoom = dpi / 72
+                matrix = fitz.Matrix(zoom, zoom)
+
+                # Renderiza página como imagem
+                pix = page.get_pixmap(matrix=matrix)
+
+                # Converte para numpy array
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width, pix.n
+                )
+
+                # Converte RGB para BGR (OpenCV)
+                if pix.n == 4:  # RGBA
+                    img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+                elif pix.n == 3:  # RGB
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+                images.append(img)
+        finally:
+            doc.close()
+
+        return images
+
+    def load_pdf_from_bytes(self, pdf_bytes: bytes, dpi: int = 300) -> List[np.ndarray]:
+        """
+        Carrega PDF de bytes e converte em imagens.
+
+        Args:
+            pdf_bytes: Conteúdo do PDF em bytes
+            dpi: Resolução de renderização
+
+        Returns:
+            Lista de imagens
+        """
+        if not HAS_PYMUPDF:
+            raise ImportError("PyMuPDF não instalado. Use: pip install PyMuPDF")
+
+        images = []
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        try:
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                zoom = dpi / 72
+                matrix = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=matrix)
+
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width, pix.n
+                )
+
+                if pix.n == 4:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+                elif pix.n == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+                images.append(img)
+        finally:
+            doc.close()
+
+        return images
+
+    def process_pdf(
+        self,
+        pdf_source: Union[str, Path, bytes],
+        dpi: int = 300,
+        binarize: bool = False
+    ) -> List[np.ndarray]:
+        """
+        Processa todas as páginas de um PDF para OCR.
+
+        Args:
+            pdf_source: Caminho ou bytes do PDF
+            dpi: Resolução de renderização
+            binarize: Se deve binarizar as imagens
+
+        Returns:
+            Lista de imagens processadas
+        """
+        if isinstance(pdf_source, bytes):
+            images = self.load_pdf_from_bytes(pdf_source, dpi)
+        else:
+            images = self.load_pdf(pdf_source, dpi)
+
+        processed = []
+        for img in images:
+            proc_img = self.process_for_ocr(img, binarize=binarize)
+            processed.append(proc_img)
+
+        return processed
 
     def to_grayscale(self, image: np.ndarray) -> np.ndarray:
         """

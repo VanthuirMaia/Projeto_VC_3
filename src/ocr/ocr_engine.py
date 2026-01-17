@@ -88,16 +88,14 @@ class OCREngine:
         }
 
     def _initialize_engines(self):
-        """Inicializa os engines de OCR disponíveis."""
-        primary = self.config.get("primary_engine", "easyocr")
+        """Inicializa todos os engines de OCR disponíveis."""
+        # Inicializa todos os engines para permitir ensemble
+        self._init_easyocr()
+        self._init_paddleocr()
+        self._init_tesseract()
 
-        # Tenta inicializar o engine principal primeiro
-        if primary == "easyocr":
-            self._init_easyocr()
-        elif primary == "paddleocr":
-            self._init_paddleocr()
-        elif primary == "tesseract":
-            self._init_tesseract()
+        available = self.get_available_engines()
+        logger.info(f"Engines OCR disponíveis: {available}")
 
     def _init_easyocr(self):
         """Inicializa EasyOCR."""
@@ -305,42 +303,135 @@ class OCREngine:
         self,
         image: np.ndarray,
         engines: List[str] = None
-    ) -> List[OCRResult]:
+    ) -> Tuple[List[OCRResult], Dict[str, List[OCRResult]]]:
         """
         Executa OCR com múltiplos engines e combina resultados.
 
-        Justificativa: Ensemble de múltiplos OCRs pode aumentar
-        precisão ao comparar e validar resultados.
+        Estratégia de ensemble:
+        1. Executa OCR com cada engine disponível
+        2. Combina todos os textos únicos encontrados
+        3. Prioriza resultados com maior confiança
+        4. Merge de bboxes sobrepostos
 
         Args:
             image: Imagem para OCR
             engines: Lista de engines a usar (None = todos disponíveis)
 
         Returns:
-            Lista combinada de resultados
+            Tupla (resultados combinados, resultados por engine)
         """
         engines = engines or self.get_available_engines()
 
-        all_results = {}
+        results_by_engine = {}
         for engine in engines:
             if engine in self._engines:
                 try:
                     results = self.extract_text(image, engine=engine, detail=True)
-                    all_results[engine] = results
+                    results_by_engine[engine] = results
+                    logger.info(f"{engine}: {len(results)} detecções")
                 except Exception as e:
                     logger.warning(f"Erro no engine {engine}: {e}")
 
-        # Por simplicidade, retorna resultados do engine primário
-        # Em implementação mais sofisticada, poderia fazer merge/votação
-        primary = self.config.get("primary_engine", "easyocr")
-        if primary in all_results:
-            return all_results[primary]
+        # Combina resultados de todos os engines
+        combined = self._merge_results(results_by_engine)
 
-        # Fallback para primeiro disponível
-        if all_results:
-            return list(all_results.values())[0]
+        return combined, results_by_engine
 
-        return []
+    def _merge_results(self, results_by_engine: Dict[str, List[OCRResult]]) -> List[OCRResult]:
+        """
+        Faz merge inteligente dos resultados de múltiplos engines.
+
+        Estratégia:
+        - Agrupa detecções por região (bbox similar)
+        - Para regiões com múltiplas detecções, escolhe a de maior confiança
+        - Adiciona detecções únicas de cada engine
+        """
+        if not results_by_engine:
+            return []
+
+        all_results = []
+        seen_texts = set()
+
+        # Coleta todos os resultados com fonte
+        for engine, results in results_by_engine.items():
+            for r in results:
+                all_results.append((engine, r))
+
+        # Ordena por confiança (maior primeiro)
+        all_results.sort(key=lambda x: x[1].confidence, reverse=True)
+
+        merged = []
+        used_bboxes = []
+
+        for engine, result in all_results:
+            # Normaliza texto para comparação
+            text_norm = result.text.strip().lower()
+
+            # Verifica se bbox sobrepõe com algum já usado
+            is_duplicate = False
+            if result.bbox:
+                for used_bbox in used_bboxes:
+                    if self._bbox_overlap(result.bbox, used_bbox) > 0.5:
+                        is_duplicate = True
+                        break
+
+            # Adiciona se não for duplicata ou se texto for novo
+            if not is_duplicate or text_norm not in seen_texts:
+                merged.append(result)
+                seen_texts.add(text_norm)
+                if result.bbox:
+                    used_bboxes.append(result.bbox)
+
+        return merged
+
+    def _bbox_overlap(self, bbox1: List[int], bbox2: List[int]) -> float:
+        """Calcula IoU (Intersection over Union) de dois bboxes."""
+        if not bbox1 or not bbox2 or len(bbox1) < 4 or len(bbox2) < 4:
+            return 0.0
+
+        x1 = max(bbox1[0], bbox2[0])
+        y1 = max(bbox1[1], bbox2[1])
+        x2 = min(bbox1[2], bbox2[2])
+        y2 = min(bbox1[3], bbox2[3])
+
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+
+        intersection = (x2 - x1) * (y2 - y1)
+        area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
+        area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
+        union = area1 + area2 - intersection
+
+        return intersection / union if union > 0 else 0.0
+
+    def get_combined_text(self, results_by_engine: Dict[str, List[OCRResult]]) -> str:
+        """
+        Combina texto de múltiplos engines de forma inteligente.
+
+        Concatena os textos únicos de cada engine, priorizando
+        engines mais confiáveis.
+        """
+        all_texts = []
+        seen_phrases = set()
+
+        # Ordem de prioridade dos engines
+        priority = ["easyocr", "paddleocr", "tesseract"]
+
+        for engine in priority:
+            if engine in results_by_engine:
+                results = results_by_engine[engine]
+                sorted_results = sorted(
+                    results,
+                    key=lambda r: (r.bbox[1], r.bbox[0]) if r.bbox else (0, 0)
+                )
+                for r in sorted_results:
+                    text = r.text.strip()
+                    # Evita duplicatas exatas
+                    if text.lower() not in seen_phrases and len(text) > 1:
+                        all_texts.append(text)
+                        seen_phrases.add(text.lower())
+
+        return " ".join(all_texts)
 
     def filter_by_confidence(
         self,
