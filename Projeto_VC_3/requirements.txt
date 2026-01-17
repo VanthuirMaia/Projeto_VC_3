@@ -1,0 +1,43 @@
+# Pipeline OCR para Notas Fiscais - Dependências
+# ================================================
+
+# Framework principal
+torch>=2.0.0
+torchvision>=0.15.0
+
+# OCR Engines (modelos pré-treinados)
+easyocr>=1.7.0
+pytesseract>=0.3.10
+paddleocr>=2.7.0
+
+# Processamento de imagens
+opencv-python>=4.8.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# Processamento de PDF
+PyMuPDF>=1.23.0
+
+# API Backend
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+
+# Processamento de dados
+pandas>=2.0.0
+pydantic>=2.5.0
+
+# Extração de padrões (regex, NLP)
+regex>=2023.10.0
+
+# Utilitários
+python-dotenv>=1.0.0
+tqdm>=4.65.0
+
+# Testes
+pytest>=7.4.0
+
+# Jupyter para demonstração
+jupyter>=1.0.0
+ipywidgets>=8.0.0
+matplotlib>=3.7.0
