@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "cd Projeto_VC_3 && pip install -r requirements.txt"
+  },
+  "deploy": {
+    "startCommand": "cd Projeto_VC_3 && python run_api.py",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
