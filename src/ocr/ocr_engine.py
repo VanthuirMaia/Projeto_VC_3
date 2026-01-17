@@ -77,7 +77,6 @@ class OCREngine:
             },
             "paddleocr": {
                 "lang": "pt",
-                "use_gpu": True,
                 "use_angle_cls": True,
             },
             "tesseract": {
@@ -120,7 +119,6 @@ class OCREngine:
             cfg = self.config.get("paddleocr", {})
             self._engines["paddleocr"] = PaddleOCR(
                 lang=cfg.get("lang", "pt"),
-                use_gpu=cfg.get("use_gpu", True),
                 use_angle_cls=cfg.get("use_angle_cls", True),
                 show_log=False,
             )
