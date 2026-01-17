@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Union, Tuple
 from dataclasses import dataclass, field
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -117,16 +118,34 @@ class OCREngine:
         try:
             from paddleocr import PaddleOCR
             cfg = self.config.get("paddleocr", {})
-            self._engines["paddleocr"] = PaddleOCR(
-                lang=cfg.get("lang", "pt"),
-                use_angle_cls=cfg.get("use_angle_cls", True),
-                show_log=False,
-            )
+            # Parâmetros do PaddleOCR
+            # Nota: use_angle_cls foi substituído por use_textline_orientation nas versões recentes
+            paddle_params = {
+                "lang": cfg.get("lang", "pt"),
+            }
+            # Usa use_textline_orientation se disponível (versões recentes)
+            # Fallback para use_angle_cls em versões antigas
+            use_textline_orientation = cfg.get("use_textline_orientation")
+            use_angle_cls = cfg.get("use_angle_cls")
+            
+            if use_textline_orientation is not None:
+                paddle_params["use_textline_orientation"] = use_textline_orientation
+            elif use_angle_cls is not None:
+                # Mantém compatibilidade com versões antigas (pode gerar deprecation warning)
+                paddle_params["use_angle_cls"] = use_angle_cls
+            else:
+                # Padrão: tenta usar parâmetro moderno
+                paddle_params["use_textline_orientation"] = True
+            
+            # Não adiciona use_gpu - versões recentes detectam GPU automaticamente
+            # Se precisar forçar CPU, use: use_pdserving=False
+            
+            self._engines["paddleocr"] = PaddleOCR(**paddle_params)
             logger.info("PaddleOCR inicializado com sucesso")
         except ImportError:
-            logger.warning("PaddleOCR não instalado. Use: pip install paddleocr")
+            logger.warning("PaddleOCR não instalado. Use: pip install paddleocr paddlepaddle")
         except Exception as e:
-            logger.error(f"Erro ao inicializar PaddleOCR: {e}")
+            logger.error(f"Erro ao inicializar PaddleOCR: {e}", exc_info=True)
 
     def _init_tesseract(self):
         """Inicializa Tesseract."""
@@ -143,6 +162,13 @@ class OCREngine:
             if tesseract_cmd:
                 pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
                 logger.info(f"Tesseract configurado manualmente: {tesseract_cmd}")
+                
+                # Configura TESSDATA_PREFIX para encontrar idiomas
+                tesseract_dir = os.path.dirname(tesseract_cmd)
+                tessdata_dir = os.path.join(tesseract_dir, "tessdata")
+                if os.path.exists(tessdata_dir):
+                    os.environ["TESSDATA_PREFIX"] = tessdata_dir
+                    logger.info(f"TESSDATA_PREFIX configurado: {tessdata_dir}")
             else:
                 # Tenta detecção automática (especialmente no Windows)
                 if platform.system() == "Windows":
@@ -159,6 +185,12 @@ class OCREngine:
                         if os.path.exists(path):
                             pytesseract.pytesseract.tesseract_cmd = path
                             logger.info(f"Tesseract detectado automaticamente: {path}")
+                            # Configura TESSDATA_PREFIX
+                            tesseract_dir = os.path.dirname(path)
+                            tessdata_dir = os.path.join(tesseract_dir, "tessdata")
+                            if os.path.exists(tessdata_dir):
+                                os.environ["TESSDATA_PREFIX"] = tessdata_dir
+                                logger.info(f"TESSDATA_PREFIX configurado: {tessdata_dir}")
                             break
                     else:
                         # Tenta encontrar no PATH
@@ -171,10 +203,35 @@ class OCREngine:
                                 "Configure manualmente em config.py: tesseract_cmd = r'C:\\...\\tesseract.exe'"
                             )
             
+            # Configura TESSDATA_PREFIX se ainda não foi configurado
+            if "TESSDATA_PREFIX" not in os.environ:
+                # Tenta encontrar tessdata automaticamente
+                tesseract_dir = os.path.dirname(pytesseract.pytesseract.tesseract_cmd) if hasattr(pytesseract.pytesseract, 'tesseract_cmd') and pytesseract.pytesseract.tesseract_cmd else None
+                if not tesseract_dir or not os.path.exists(tesseract_dir):
+                    # Caminhos comuns
+                    for common_dir in [r"C:\Program Files\Tesseract-OCR", r"C:\Program Files (x86)\Tesseract-OCR"]:
+                        tessdata_path = os.path.join(common_dir, "tessdata")
+                        if os.path.exists(tessdata_path):
+                            os.environ["TESSDATA_PREFIX"] = tessdata_path
+                            logger.info(f"TESSDATA_PREFIX configurado automaticamente: {tessdata_path}")
+                            break
+                elif tesseract_dir:
+                    tessdata_path = os.path.join(tesseract_dir, "tessdata")
+                    if os.path.exists(tessdata_path):
+                        os.environ["TESSDATA_PREFIX"] = tessdata_path
+            
             # Testa se Tesseract está funcionando
             version = pytesseract.get_tesseract_version()
             self._engines["tesseract"] = pytesseract
             logger.info(f"Tesseract inicializado com sucesso (versão: {version})")
+            
+            # Verifica idioma português
+            try:
+                langs = pytesseract.get_languages(config='')
+                if 'por' not in langs:
+                    logger.warning("Idioma português (por) não encontrado. Baixe por.traineddata e coloque em tessdata/")
+            except:
+                logger.warning("Não foi possível verificar idiomas do Tesseract")
             
         except ImportError:
             logger.warning("pytesseract não instalado. Use: pip install pytesseract")
@@ -383,48 +440,120 @@ class OCREngine:
 
     def _merge_results(self, results_by_engine: Dict[str, List[OCRResult]]) -> List[OCRResult]:
         """
-        Faz merge inteligente dos resultados de múltiplos engines.
+        Faz merge inteligente dos resultados de múltiplos engines com votação ponderada.
 
-        Estratégia:
+        Estratégia melhorada:
         - Agrupa detecções por região (bbox similar)
-        - Para regiões com múltiplas detecções, escolhe a de maior confiança
+        - Votação ponderada por confiança e engine
+        - Para regiões com múltiplas detecções, escolhe por consenso
         - Adiciona detecções únicas de cada engine
+        - Pesos por engine: EasyOCR=0.4, PaddleOCR=0.4, Tesseract=0.2
         """
         if not results_by_engine:
             return []
 
+        # Pesos por engine (baseado em performance típica)
+        engine_weights = {
+            "easyocr": 0.4,
+            "paddleocr": 0.4,
+            "tesseract": 0.2,
+        }
+
         all_results = []
         seen_texts = set()
 
-        # Coleta todos os resultados com fonte
+        # Coleta todos os resultados com fonte e peso
         for engine, results in results_by_engine.items():
+            weight = engine_weights.get(engine, 0.3)
             for r in results:
-                all_results.append((engine, r))
+                # Score combinado: confiança * peso do engine
+                combined_score = r.confidence * weight
+                all_results.append((engine, r, combined_score))
 
-        # Ordena por confiança (maior primeiro)
-        all_results.sort(key=lambda x: x[1].confidence, reverse=True)
+        # Ordena por score combinado (maior primeiro)
+        all_results.sort(key=lambda x: x[2], reverse=True)
 
         merged = []
         used_bboxes = []
+        # Agrupa resultados por região para votação
+        region_groups = {}
 
-        for engine, result in all_results:
-            # Normaliza texto para comparação
-            text_norm = result.text.strip().lower()
+        for engine, result, score in all_results:
+            if not result.bbox or len(result.bbox) < 4:
+                # Sem bbox, adiciona diretamente se texto for único
+                text_norm = result.text.strip().lower()
+                if text_norm and text_norm not in seen_texts:
+                    merged.append(result)
+                    seen_texts.add(text_norm)
+                continue
 
-            # Verifica se bbox sobrepõe com algum já usado
-            is_duplicate = False
-            if result.bbox:
-                for used_bbox in used_bboxes:
-                    if self._bbox_overlap(result.bbox, used_bbox) > 0.5:
-                        is_duplicate = True
-                        break
+            # Encontra grupo de região similar
+            grouped = False
+            for region_key, group_results in region_groups.items():
+                # Verifica se bbox está na mesma região
+                if self._bbox_overlap(result.bbox, region_key) > 0.3:
+                    group_results.append((engine, result, score))
+                    grouped = True
+                    break
 
-            # Adiciona se não for duplicata ou se texto for novo
-            if not is_duplicate or text_norm not in seen_texts:
-                merged.append(result)
-                seen_texts.add(text_norm)
-                if result.bbox:
-                    used_bboxes.append(result.bbox)
+            if not grouped:
+                # Nova região
+                region_groups[tuple(result.bbox)] = [(engine, result, score)]
+
+        # Processa cada grupo de região
+        for region_key, group_results in region_groups.items():
+            if len(group_results) == 1:
+                # Única detecção na região
+                _, result, _ = group_results[0]
+                text_norm = result.text.strip().lower()
+                if text_norm and text_norm not in seen_texts:
+                    merged.append(result)
+                    seen_texts.add(text_norm)
+                    used_bboxes.append(list(region_key))
+            else:
+                # Múltiplas detecções - votação ponderada
+                # Agrupa por texto similar
+                text_groups = {}
+                for engine, result, score in group_results:
+                    text_norm = result.text.strip().lower()
+                    # Normaliza texto para agrupamento (remove espaços extras)
+                    text_key = re.sub(r'\s+', ' ', text_norm)
+                    
+                    if text_key not in text_groups:
+                        text_groups[text_key] = []
+                    text_groups[text_key].append((engine, result, score))
+
+                # Escolhe texto com maior score total
+                best_text = None
+                best_score = 0
+                best_result = None
+
+                for text_key, text_results in text_groups.items():
+                    # Soma scores ponderados
+                    total_score = sum(score for _, _, score in text_results)
+                    # Bônus se múltiplos engines concordam
+                    consensus_bonus = len(text_results) * 0.1
+                    final_score = total_score + consensus_bonus
+
+                    if final_score > best_score:
+                        best_score = final_score
+                        # Escolhe resultado com maior confiança individual
+                        best_result = max(text_results, key=lambda x: x[1].confidence)[1]
+                        best_text = text_key
+
+                if best_result and best_text not in seen_texts:
+                    # Ajusta confiança baseada em consenso
+                    consensus_count = len(text_groups.get(best_text, []))
+                    if consensus_count > 1:
+                        # Múltiplos engines concordam - aumenta confiança
+                        best_result.confidence = min(1.0, best_result.confidence * 1.1)
+                    
+                    merged.append(best_result)
+                    seen_texts.add(best_text)
+                    used_bboxes.append(list(region_key))
+
+        # Ordena resultados por posição (top-left primeiro)
+        merged.sort(key=lambda r: (r.bbox[1], r.bbox[0]) if r.bbox else (0, 0))
 
         return merged
 
@@ -448,12 +577,20 @@ class OCREngine:
 
         return intersection / union if union > 0 else 0.0
 
-    def get_combined_text(self, results_by_engine: Dict[str, List[OCRResult]]) -> str:
+    def get_combined_text(
+        self,
+        results_by_engine: Dict[str, List[OCRResult]],
+        use_postprocessing: bool = True
+    ) -> str:
         """
         Combina texto de múltiplos engines de forma inteligente.
 
         Concatena os textos únicos de cada engine, priorizando
-        engines mais confiáveis.
+        engines mais confiáveis e aplicando pós-processamento.
+        
+        Args:
+            results_by_engine: Resultados por engine
+            use_postprocessing: Se True, aplica pós-processamento
         """
         all_texts = []
         seen_phrases = set()
@@ -475,7 +612,20 @@ class OCREngine:
                         all_texts.append(text)
                         seen_phrases.add(text.lower())
 
-        return " ".join(all_texts)
+        combined = " ".join(all_texts)
+        
+        # Aplica pós-processamento se habilitado
+        if use_postprocessing:
+            try:
+                from src.ocr.text_postprocessor import TextPostProcessor
+                postprocessor = TextPostProcessor()
+                combined = postprocessor.process(combined, apply_all=True)
+            except ImportError:
+                logger.warning("TextPostProcessor não disponível, pulando pós-processamento")
+            except Exception as e:
+                logger.warning(f"Erro no pós-processamento: {e}")
+
+        return combined
 
     def filter_by_confidence(
         self,

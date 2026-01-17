@@ -1,0 +1,24 @@
+services:
+  # Backend API
+  - type: web
+    name: docuextract-api
+    env: python
+    buildCommand: cd Projeto_VC_3 && pip install -r requirements.txt
+    startCommand: cd Projeto_VC_3 && python run_api.py
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: HOST
+        value: 0.0.0.0
+    plan: starter
+
+  # Frontend Streamlit (opcional - pode usar Streamlit Cloud)
+  - type: web
+    name: docuextract-frontend
+    env: python
+    buildCommand: cd Interface && pip install -r requirements.txt
+    startCommand: cd Interface && streamlit run app_docuextract.py --server.port=$PORT --server.address=0.0.0.0
+    envVars:
+      - key: API_BASE_URL
+        value: https://docuextract-api.onrender.com
+    plan: starter

@@ -51,20 +51,38 @@ pip install -r requirements.txt
 
 O projeto requer o Tesseract OCR instalado no sistema operacional.
 
+#### ⚡ Instalação Automática (Windows - Recomendado):
+
+```bash
+cd Projeto_VC_3
+python install_tesseract.py
+```
+
+O script irá:
+- ✅ Verificar se Tesseract já está instalado
+- 📥 Baixar o instalador automaticamente
+- ⚙️ Configurar o caminho no `config.py`
+- 🔍 Verificar idioma português
+
+#### 📋 Instalação Manual:
+
 #### Windows:
 1. Baixe o instalador do Tesseract:
    - https://github.com/UB-Mannheim/tesseract/wiki
    - Recomendado: `tesseract-ocr-w64-setup-5.x.x.exe`
 2. Execute o instalador e instale no caminho padrão: `C:\Program Files\Tesseract-OCR`
-3. (Opcional) Adicione ao PATH do sistema, ou configure manualmente em `src/config.py`:
+3. **IMPORTANTE:** Durante a instalação, marque:
+   - ✅ "Add to PATH"
+   - ✅ "Portuguese" (idioma)
+4. Após instalar, execute: `python install_tesseract.py` para configurar automaticamente
+
+**Ou configure manualmente em `src/config.py`:**
    ```python
    "tesseract": {
        "tesseract_cmd": r"C:\Program Files\Tesseract-OCR\tesseract.exe",
        ...
    }
    ```
-4. Baixe o pacote de idioma português durante a instalação, ou baixe separadamente:
-   - https://github.com/tesseract-ocr/tessdata
 
 #### Linux (Ubuntu/Debian):
 ```bash

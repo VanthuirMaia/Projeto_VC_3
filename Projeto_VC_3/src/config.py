@@ -6,8 +6,16 @@ Este arquivo contém todas as configurações do pipeline,
 com justificativas técnicas para cada escolha.
 """
 
+import os
 from pathlib import Path
 from typing import List, Dict
+
+# Carregar variáveis de ambiente (opcional)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv não é obrigatório
 
 # =============================================================================
 # CAMINHOS DO PROJETO
@@ -186,14 +194,17 @@ OCR_CONFIG = {
         "quantize": True,  # Quantização para menor uso de memória
     },
 
-    # Configurações PaddleOCR
-    "paddleocr": {
-        "lang": "pt",
-        "use_gpu": True,
-        "use_angle_cls": True,  # Classificador de ângulo
-        "det_db_thresh": 0.3,
-        "det_db_box_thresh": 0.5,
-    },
+            # Configurações PaddleOCR
+            "paddleocr": {
+                "lang": "pt",
+                # Nota: use_angle_cls foi substituído por use_textline_orientation nas versões recentes
+                # O código tenta usar o parâmetro moderno automaticamente
+                "use_textline_orientation": True,  # Classificador de orientação de texto (novo)
+                # Fallback para versões antigas:
+                # "use_angle_cls": True,  # Classificador de ângulo (deprecated)
+                "det_db_thresh": 0.3,
+                "det_db_box_thresh": 0.5,
+            },
 
     # Configurações Tesseract
     "tesseract": {
@@ -202,7 +213,7 @@ OCR_CONFIG = {
         # Caminho do executável Tesseract (None = detecção automática)
         # Windows exemplo: r"C:\Program Files\Tesseract-OCR\tesseract.exe"
         # Linux/Mac: geralmente em PATH, mas pode ser "/usr/bin/tesseract"
-        "tesseract_cmd": None,  # None = tentar detecção automática
+        "tesseract_cmd": r"C:\Program Files\Tesseract-OCR\tesseract.exe",  # None = tentar detecção automática
     },
 
     # Limiares de confiança
@@ -284,15 +295,19 @@ EXTRACTION_CONFIG = {
 API_CONFIG = {
     "host": "0.0.0.0",
     "port": 8000,
-    "debug": False,
+    "debug": os.getenv("DEBUG", "False").lower() == "true",
     "title": "API OCR Notas Fiscais",
     "description": "API para extração de dados de Notas Fiscais via OCR",
     "version": "1.0.0",
+    
+    # Host e Porta (suporta variáveis de ambiente para deploy)
+    "host": os.getenv("API_HOST", "0.0.0.0"),
+    "port": int(os.getenv("API_PORT", os.getenv("PORT", 8000))),  # PORT é padrão em Railway/Render
 
     # Limites
     "max_upload_size_mb": 10,
     "request_timeout": 60,  # segundos
 
-    # CORS
-    "cors_origins": ["*"],  # Ajustar em produção
+    # CORS (suporta variáveis de ambiente)
+    "cors_origins": os.getenv("CORS_ORIGINS", "*").split(",") if os.getenv("CORS_ORIGINS") else ["*"],
 }

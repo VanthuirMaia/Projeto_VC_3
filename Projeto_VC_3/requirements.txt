@@ -9,6 +9,7 @@ torchvision>=0.15.0
 easyocr>=1.7.0
 pytesseract>=0.3.10
 paddleocr>=2.7.0
+paddlepaddle>=3.3.0  # Dependência obrigatória do PaddleOCR
 
 # Processamento de imagens
 opencv-python>=4.8.0

@@ -245,17 +245,23 @@ async def health_check():
 @app.post("/ocr", response_model=OCRResponse)
 async def perform_ocr(
     file: UploadFile = File(..., description="Imagem ou PDF da Nota Fiscal"),
-    engine: Optional[str] = Query(None, description="Engine OCR (easyocr, paddleocr, tesseract) ou 'ensemble' para usar todos"),
+    engine: Optional[str] = Query("ensemble", description="Engine OCR ('easyocr', 'paddleocr', 'tesseract') ou 'ensemble' para usar todos (recomendado)"),
     preprocess: bool = Query(True, description="Aplicar pré-processamento"),
+    use_enhancements: bool = Query(True, description="Aplicar melhorias avançadas de imagem"),
+    use_postprocessing: bool = Query(True, description="Aplicar pós-processamento de texto"),
 ):
     """
     Realiza OCR na imagem/PDF e retorna texto bruto.
 
     Para PDFs, processa todas as páginas e concatena o texto.
 
+    **Recomendado:** Use engine='ensemble' para melhor precisão.
+
     - **file**: Arquivo para processar (JPG, PNG, PDF, etc.)
-    - **engine**: Engine OCR ou 'ensemble' para combinar múltiplos engines
-    - **preprocess**: Se deve aplicar pré-processamento
+    - **engine**: 'ensemble' (recomendado) ou engine específico
+    - **preprocess**: Se deve aplicar pré-processamento básico
+    - **use_enhancements**: Se deve aplicar melhorias avançadas de imagem
+    - **use_postprocessing**: Se deve aplicar pós-processamento de texto
     """
     try:
         # Carrega imagens (pode ser múltiplas páginas de PDF)
@@ -264,25 +270,47 @@ async def perform_ocr(
         processor = get_image_processor()
         ocr = get_ocr_engine()
 
-        use_ensemble = engine == "ensemble"
+        # Garante que use ensemble por padrão (se None, vazio ou "ensemble")
+        if engine is None or engine == "" or engine == "ensemble":
+            use_ensemble = True
+            engine = "ensemble"  # Normaliza para garantir consistência
+        else:
+            use_ensemble = False
+        
         all_results = []
         all_texts = []
         engines_summary = {}
 
         # Processa cada página/imagem
         for page_num, image in enumerate(images):
-            # Pré-processamento
+            # Pré-processamento básico
             if preprocess:
-                image = processor.process_for_ocr(image, binarize=False)
+                processed_image = processor.process_for_ocr(image, binarize=False)
+            else:
+                processed_image = image
+            
+            # Melhorias avançadas (se habilitado)
+            if use_enhancements:
+                try:
+                    from src.preprocessing.image_enhancer import ImageEnhancer
+                    enhancer = ImageEnhancer()
+                    # Avalia qualidade e aplica melhorias adaptativas
+                    quality = enhancer.assess_image_quality(processed_image)
+                    if quality.get("is_blurry") or quality.get("is_low_contrast"):
+                        processed_image = enhancer.enhance_for_ocr(processed_image, use_adaptive=True)
+                except ImportError:
+                    pass  # Módulo opcional
+                except Exception as e:
+                    logger.warning(f"Erro ao aplicar melhorias de imagem: {e}")
 
             if use_ensemble:
                 # Usa múltiplos engines
-                combined, results_by_engine = ocr.extract_with_ensemble(image)
+                combined, results_by_engine = ocr.extract_with_ensemble(processed_image)
                 filtered = ocr.filter_by_confidence(combined)
                 all_results.extend(filtered)
 
-                # Combina texto de todos os engines
-                page_text = ocr.get_combined_text(results_by_engine)
+                # Combina texto de todos os engines (com pós-processamento se habilitado)
+                page_text = ocr.get_combined_text(results_by_engine, use_postprocessing=use_postprocessing)
                 all_texts.append(page_text)
 
                 # Sumariza resultados por engine
@@ -296,10 +324,22 @@ async def perform_ocr(
                             engines_summary[eng]["sample_texts"].append(r.text)
             else:
                 # Usa engine único
-                results = ocr.extract_text(image, engine=engine, detail=True)
+                results = ocr.extract_text(processed_image, engine=engine, detail=True)
                 filtered = ocr.filter_by_confidence(results)
                 all_results.extend(filtered)
-                all_texts.append(ocr.get_full_text(filtered))
+                
+                # Aplica pós-processamento se habilitado
+                if use_postprocessing:
+                    try:
+                        from src.ocr.text_postprocessor import TextPostProcessor
+                        postprocessor = TextPostProcessor()
+                        raw_text = ocr.get_full_text(filtered)
+                        processed_text = postprocessor.process(raw_text, apply_all=True)
+                        all_texts.append(processed_text)
+                    except ImportError:
+                        all_texts.append(ocr.get_full_text(filtered))
+                else:
+                    all_texts.append(ocr.get_full_text(filtered))
 
         # Monta resposta
         detections = [
@@ -318,7 +358,7 @@ async def perform_ocr(
             success=True,
             text=full_text,
             detections=detections,
-            engine_used="ensemble" if use_ensemble else (engine or OCR_CONFIG.get("primary_engine", "easyocr")),
+            engine_used="ensemble" if use_ensemble else (engine or "ensemble"),
             engines_results=engines_summary if use_ensemble else {}
         )
 
@@ -359,16 +399,36 @@ async def extract_nf_data(
         processor = get_image_processor()
         ocr = get_ocr_engine()
 
-        use_ensemble = engine == "ensemble"
+        # Garante que use ensemble por padrão
+        if engine is None or engine == "" or engine == "ensemble":
+            use_ensemble = True
+            engine = "ensemble"  # Normaliza para garantir consistência
+        else:
+            use_ensemble = False
+        
         all_texts = []
         total_detections = 0
         filtered_detections = 0
         engines_used = []
+        all_ocr_confidences = []  # Armazena confianças do OCR para calcular média
 
         # 2. Processa cada página
         for page_num, image in enumerate(images):
-            # Pré-processamento
+            # Pré-processamento básico
             processed_image = processor.process_for_ocr(image, binarize=False)
+            
+            # Melhorias avançadas (se disponível)
+            try:
+                from src.preprocessing.image_enhancer import ImageEnhancer
+                enhancer = ImageEnhancer()
+                # Avalia qualidade e aplica melhorias adaptativas
+                quality = enhancer.assess_image_quality(processed_image)
+                if quality.get("is_blurry") or quality.get("is_low_contrast"):
+                    processed_image = enhancer.enhance_for_ocr(processed_image, use_adaptive=True)
+            except ImportError:
+                pass  # Módulo opcional
+            except Exception as e:
+                logger.warning(f"Erro ao aplicar melhorias de imagem: {e}")
 
             if use_ensemble:
                 # Usa múltiplos engines combinados
@@ -377,9 +437,13 @@ async def extract_nf_data(
 
                 total_detections += len(combined)
                 filtered_detections += len(filtered_results)
+                
+                # Coleta confianças do OCR para cálculo de média
+                for result in filtered_results:
+                    all_ocr_confidences.append(result.confidence)
 
-                # Combina texto de todos os engines
-                page_text = ocr.get_combined_text(results_by_engine)
+                # Combina texto de todos os engines (com pós-processamento)
+                page_text = ocr.get_combined_text(results_by_engine, use_postprocessing=True)
                 all_texts.append(page_text)
 
                 engines_used = list(results_by_engine.keys())
@@ -390,6 +454,10 @@ async def extract_nf_data(
 
                 total_detections += len(ocr_results)
                 filtered_detections += len(filtered_results)
+                
+                # Coleta confianças do OCR
+                for result in filtered_results:
+                    all_ocr_confidences.append(result.confidence)
 
                 page_text = ocr.get_full_text(filtered_results)
                 all_texts.append(page_text)
@@ -397,9 +465,19 @@ async def extract_nf_data(
         # 3. Combina texto de todas as páginas
         full_text = "\n\n".join(all_texts)
 
-        # 4. Extração de campos
+        # 4. Calcula confiança média do OCR
+        ocr_confidence_avg = 0.0
+        if all_ocr_confidences:
+            ocr_confidence_avg = sum(all_ocr_confidences) / len(all_ocr_confidences)
+
+        # 5. Extração de campos
         extractor = get_nf_extractor()
         nf_data = extractor.extract(full_text)
+        
+        # 6. Melhora o cálculo de confiança combinando OCR + campos extraídos
+        # Combina confiança do OCR (peso 70%) com proporção de campos (peso 30%)
+        campos_ratio = nf_data.campos_extraidos / nf_data.campos_total if nf_data.campos_total > 0 else 0
+        nf_data.confidence_score = (ocr_confidence_avg * 0.7) + (campos_ratio * 0.3)
 
         # 5. Monta resposta
         nf_model = NFDataModel(
@@ -428,6 +506,7 @@ async def extract_nf_data(
             "engines_used": engines_used if use_ensemble else [engine or OCR_CONFIG.get("primary_engine", "easyocr")],
             "total_detections": total_detections,
             "filtered_detections": filtered_detections,
+            "ocr_confidence_avg": float(ocr_confidence_avg),  # Confiança média do OCR
         }
 
         return ExtractResponse(
